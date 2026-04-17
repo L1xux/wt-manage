@@ -43,14 +43,40 @@ def remove_worktree(name: str, args) -> None:
     wt_config = WorktreeConfig(worktree_path)
     worktree_config = wt_config.load()
 
-    # Get ports from config
+    # Get ports from config, or scan common worktree ports
     ports = []
     services_info = []
-    for svc_type, svc_config in worktree_config.get("services", {}).items():
-        port = svc_config.get("port")
-        if port:
-            ports.append(port)
-            services_info.append(f"{svc_type}: port {port}")
+
+    if worktree_config.get("services"):
+        # Use config
+        for svc_type, svc_config in worktree_config.get("services", {}).items():
+            port = svc_config.get("port")
+            if port:
+                ports.append(port)
+                services_info.append(f"{svc_type}: port {port}")
+    else:
+        # No config - scan for processes using common ports in this directory
+        info("No config found, scanning for processes...")
+        process_service = ProcessService()
+
+        # Common ports for worktrees
+        common_ports = [8000, 8001, 8002, 5173, 5174, 5175, 5000, 5001, 3000, 3001]
+
+        for port in common_ports:
+            if process_service.get_process_using_port(port):
+                # Check if process cwd is in our worktree
+                import psutil
+                for conn in psutil.net_connections():
+                    try:
+                        if conn.laddr.port == port and conn.pid:
+                            proc = psutil.Process(conn.pid)
+                            cwd = proc.cwd() or ""
+                            if worktree_path.lower() in cwd.lower():
+                                ports.append(port)
+                                services_info.append(f"port {port} (cwd matches)")
+                                info(f"  Found process on port {port}: PID {conn.pid}")
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
 
     # Confirm removal
     if not args.force:
@@ -78,12 +104,29 @@ def remove_worktree(name: str, args) -> None:
             else:
                 info(f"    No process on port {port}")
 
+    # Wait for processes to fully terminate
+    import time
+    time.sleep(2)
+
     # Remove git worktree
     info(f"Removing git worktree: {worktree_path}")
     git_service = GitService()
     removed = git_service.remove_worktree(worktree_path, force=True)
     if not removed:
         warning("Git worktree removal returned False (may already be removed)")
+
+    # Try to kill any remaining processes in the worktree directory
+    import psutil
+    for proc in psutil.process_iter(['pid', 'cwd', 'name']):
+        try:
+            cwd = proc.info.get('cwd') or ""
+            if worktree_path.lower() in cwd.lower():
+                info(f"  Killing remaining process: {proc.info['name']} (PID: {proc.info['pid']})")
+                proc.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    time.sleep(1)
 
     # Delete directory - Windows cmd approach
     import subprocess
