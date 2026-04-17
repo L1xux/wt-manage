@@ -9,37 +9,6 @@ from ..services.process_service import ProcessService
 from ..utils.logger import error, info, success, warning
 
 
-def force_delete_directory(path: str) -> bool:
-    """Force delete a directory on Windows using cmd.
-
-    Args:
-        path: Path to directory to delete.
-
-    Returns:
-        True if deleted, False otherwise.
-    """
-    if sys.platform == 'win32':
-        import subprocess
-        try:
-            # Use cmd /c rmdir /s /q for force delete on Windows
-            result = subprocess.run(
-                ['cmd', '/c', 'rmdir', '/s', '/q', path],
-                capture_output=True,
-                timeout=30
-            )
-            return result.returncode == 0
-        except Exception as e:
-            warning(f"Force delete failed: {e}")
-            return False
-    else:
-        import shutil
-        try:
-            shutil.rmtree(path)
-            return True
-        except Exception:
-            return False
-
-
 def remove_worktree(name: str, args) -> None:
     """Remove a worktree and its services.
 
@@ -116,18 +85,49 @@ def remove_worktree(name: str, args) -> None:
     if not removed:
         warning("Git worktree removal returned False (may already be removed)")
 
-    # Delete directory - try normal first, then force
-    import shutil
-    try:
-        shutil.rmtree(worktree_path)
-        info(f"Directory cleaned up: {worktree_path}")
-    except Exception as e:
-        warning(f"Normal deletion failed, trying force delete...")
-        if force_delete_directory(worktree_path):
-            info(f"Directory force deleted: {worktree_path}")
-        else:
+    # Delete directory - Windows cmd approach
+    import subprocess
+
+    deleted = False
+    if sys.platform == 'win32':
+        # Use PowerShell Remove-Item with -Recurse -Force
+        try:
+            result = subprocess.run(
+                ['powershell', '-Command', f'Remove-Item -Path "{worktree_path}" -Recurse -Force -ErrorAction Stop'],
+                capture_output=True,
+                timeout=30
+            )
+            if result.returncode == 0:
+                deleted = True
+        except Exception as e:
+            pass
+
+        # Also verify and retry with cmd if needed
+        if not deleted:
+            try:
+                subprocess.run(
+                    ['cmd', '/c', 'rd', '/s', '/q', worktree_path],
+                    capture_output=True,
+                    timeout=30
+                )
+                deleted = True
+            except:
+                pass
+
+        # Check if directory still exists
+        import os
+        if os.path.exists(worktree_path):
+            warning(f"Directory still exists: {worktree_path}")
+            warning("Close any programs that have this folder open (VS Code, Explorer)")
+            return
+
+    else:
+        import shutil
+        try:
+            shutil.rmtree(worktree_path)
+            deleted = True
+        except Exception as e:
             warning(f"Could not remove directory: {e}")
-            warning("You may need to manually close any programs that have this folder open")
             return
 
     print()
