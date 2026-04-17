@@ -1,10 +1,10 @@
 """Process management service for starting and killing processes."""
 
 import os
-import signal
+import sys
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import psutil
 
@@ -17,35 +17,70 @@ class ProcessService:
         command: str,
         cwd: str,
         env: Optional[Dict[str, str]] = None,
-        shell: bool = True,
+        shell: bool = False,
+        log_file: Optional[str] = None,
     ) -> int:
         """Start a process in the background.
 
         Args:
-            command: Command to execute.
+            command: Command to execute (string or list).
             cwd: Working directory for the process.
             env: Environment variables (merged with current env).
             shell: If True, execute through shell.
+            log_file: Optional path to log file for stdout/stderr.
 
         Returns:
             PID of the started process.
-
-        Raises:
-            subprocess.CalledProcessError: If process fails to start.
         """
         full_env = os.environ.copy()
         if env:
             full_env.update(env)
 
-        process = subprocess.Popen(
-            command,
-            cwd=cwd,
-            env=full_env,
-            shell=shell,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
-        )
+        # Determine if we're on Windows
+        is_windows = sys.platform == 'win32'
+
+        # Prepare command
+        if isinstance(command, str):
+            if is_windows:
+                # On Windows, use cmd /c for proper shell execution
+                cmd = ['cmd', '/c', command]
+            else:
+                # On Unix, use shell=True for proper execution
+                cmd = command
+                shell = True
+        else:
+            cmd = command
+
+        # Setup output (log file or devnull)
+        if log_file:
+            # Ensure log directory exists
+            log_path = Path(log_file)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            stdout_file = open(log_file, 'a')
+            stderr_file = subprocess.STDOUT  # Redirect stderr to stdout
+        else:
+            stdout_file = subprocess.DEVNULL
+            stderr_file = subprocess.DEVNULL
+
+        # Start process
+        kwargs = {
+            'cwd': cwd,
+            'env': full_env,
+            'stdout': stdout_file,
+            'stderr': stderr_file,
+        }
+
+        if is_windows:
+            # On Windows, don't use start_new_session - it causes issues
+            # Use CREATE_NEW_PROCESS_GROUP for proper detachment
+            kwargs['creationflags'] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs['start_new_session'] = True
+
+        if shell:
+            kwargs['shell'] = True
+
+        process = subprocess.Popen(cmd, **kwargs)
 
         return process.pid
 
@@ -65,10 +100,19 @@ class ProcessService:
                 proc.wait(timeout=5)
             except psutil.TimeoutExpired:
                 proc.kill()
+                proc.wait(timeout=3)
             return True
         except psutil.NoSuchProcess:
             return True  # Already dead
         except psutil.AccessDenied:
+            # On Windows, try taskkill as fallback
+            if sys.platform == 'win32':
+                try:
+                    subprocess.run(['taskkill', '/F', '/PID', str(pid)],
+                                   capture_output=True, timeout=5)
+                    return True
+                except Exception:
+                    pass
             return False
 
     def kill_processes_on_ports(self, ports: List[int]) -> List[int]:

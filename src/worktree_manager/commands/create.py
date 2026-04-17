@@ -12,7 +12,7 @@ from ..config import ConfigManager, WorktreeConfig
 from ..services.ai_service import AIService
 from ..services.git_service import GitService
 from ..services.process_service import ProcessService
-from ..utils.logger import error, info, success, warning
+from ..utils.logger import error, header, info, success, warning
 
 
 def get_env_path() -> Optional[str]:
@@ -79,6 +79,7 @@ def analyze_and_configure_services(
         Tuple of (services_dict, services_info_list).
     """
     from ..services.port_service import PortService
+    import time
 
     info("Analyzing project structure...")
 
@@ -93,12 +94,24 @@ def analyze_and_configure_services(
     next_server_port = base_server_port
     next_client_port = base_client_port
 
+    # Setup log directory
+    log_dir = Path(worktree_path) / ".worktree" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
     def find_free_port(start_from: int) -> int:
         """Find next free port starting from start_from."""
         port = start_from
         while port_service.is_port_in_use(port):
             port += 1
         return port
+
+    def wait_for_port(port: int, timeout: int = 10) -> bool:
+        """Wait for port to start listening. Returns True if listening."""
+        for _ in range(timeout):
+            time.sleep(1)
+            if port_service.is_port_listening(port):
+                return True
+        return False
 
     # Configure each detected service
     for svc in analysis.get("services", []):
@@ -133,17 +146,32 @@ def analyze_and_configure_services(
             info(f"  Command: {start_command}")
             info(f"  Working directory: {abs_working_dir}")
 
+            # Create log file for this service
+            log_file = str(log_dir / f"{svc_name}.log")
+
             process_service = ProcessService()
             pid = process_service.start_process(
                 command=start_command,
                 cwd=abs_working_dir,
+                log_file=log_file,
             )
+
+            # Wait for port to be listening
+            info(f"  Waiting for server to start...")
+            if wait_for_port(port):
+                success(f"  Server running at http://localhost:{port}")
+                status = "running"
+            else:
+                warning(f"  Server started but port {port} not responding yet")
+                status = "started"
 
             services[svc_name] = {
                 "port": port,
                 "pid": pid,
                 "start_command": start_command,
                 "working_dir": abs_working_dir,
+                "status": status,
+                "log_file": log_file,
             }
             services_info.append(f"  Server: http://localhost:{port}")
 
@@ -162,17 +190,32 @@ def analyze_and_configure_services(
             info(f"  Command: {start_command}")
             info(f"  Working directory: {abs_working_dir}")
 
+            # Create log file for this service
+            log_file = str(log_dir / f"{svc_name}.log")
+
             process_service = ProcessService()
             pid = process_service.start_process(
                 command=start_command,
                 cwd=abs_working_dir,
+                log_file=log_file,
             )
+
+            # Wait for port to be listening
+            info(f"  Waiting for client to start...")
+            if wait_for_port(port):
+                success(f"  Client running at http://localhost:{port}")
+                status = "running"
+            else:
+                warning(f"  Client started but port {port} not responding yet")
+                status = "started"
 
             services[svc_name] = {
                 "port": port,
                 "pid": pid,
                 "start_command": start_command,
                 "working_dir": abs_working_dir,
+                "status": status,
+                "log_file": log_file,
             }
             services_info.append(f"  Client: http://localhost:{port}")
 
@@ -272,7 +315,28 @@ def create_worktree(name: str, args) -> None:
 
     print()
     info(f"Worktree location: {worktree_path}")
+    info(f"Logs saved to: {worktree_path}/.worktree/logs/")
     info(f"To remove: wt-remove {name}")
+
+    # Show last few lines of logs for each service
+    print()
+    header("Live Log Output (last 20 lines each):")
+    print("-" * 60)
+    for svc_name, svc_config in services.items():
+        log_file = svc_config.get("log_file")
+        if log_file and Path(log_file).exists():
+            info(f"{svc_name}:")
+            try:
+                with open(log_file, 'r') as f:
+                    lines = f.readlines()
+                    for line in lines[-20:]:
+                        print(f"  {line.rstrip()}")
+            except Exception:
+                print("  (no output yet)")
+            print()
+
+    print("=" * 60)
+    info("To watch logs continuously, run: wt-logs " + name)
 
 
 def main(args=None):

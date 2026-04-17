@@ -3,8 +3,6 @@
 import sys
 from pathlib import Path
 
-import psutil
-
 from ..config import ConfigManager, WorktreeConfig
 from ..services.git_service import GitService
 from ..services.process_service import ProcessService
@@ -92,17 +90,15 @@ def get_worktree_path(name: str, config: ConfigManager) -> str:
     sys.exit(1)
 
 
-def kill_worktree_services(worktree_config: dict, worktree_path: str = "") -> None:
-    """Kill all services associated with a worktree.
+def kill_worktree_services(worktree_config: dict) -> None:
+    """Kill all services associated with a worktree based on config.
 
     Args:
         worktree_config: Worktree configuration dictionary.
-        worktree_path: Path to the worktree directory for orphaned process cleanup.
     """
     services = worktree_config.get("services", {})
     process_service = ProcessService()
 
-    # First pass: kill by PID
     for svc_type, svc_config in services.items():
         if svc_type == "docker":
             compose_file = svc_config.get("compose_file")
@@ -111,34 +107,22 @@ def kill_worktree_services(worktree_config: dict, worktree_path: str = "") -> No
                 process_service.stop_docker_compose(compose_file)
 
         elif svc_type.startswith("server") or svc_type.startswith("client"):
+            port = svc_config.get("port")
             pid = svc_config.get("pid")
+
+            # First try killing by PID
             if pid and process_service.is_process_running(pid):
-                info(f"Stopping {svc_type} (PID: {pid})")
+                info(f"Stopping {svc_type} (PID: {pid}, port: {port})")
                 process_service.kill_process(pid)
-
-    # Second pass: kill by port (fallback if PID didn't work or wasn't stored)
-    ports = []
-    for svc_config in services.values():
-        port = svc_config.get("port")
-        if port:
-            ports.append(port)
-
-    if ports:
-        killed = process_service.kill_processes_on_ports(ports)
-        if killed:
-            info(f"Stopped processes on ports: {ports}")
-
-    # Third pass: kill orphaned processes by cwd (for worktrees without config)
-    if worktree_path:
-        worktree_path_lower = worktree_path.lower()
-        for proc in psutil.process_iter(['pid', 'cwd', 'name']):
-            try:
-                cwd = proc.info.get('cwd')
-                if cwd and worktree_path_lower in cwd.lower():
-                    warning(f"Killing orphaned process: PID {proc.info['pid']} ({proc.info['name']})")
-                    process_service.kill_process(proc.info['pid'])
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+            else:
+                # Always try killing by port as primary method
+                if port:
+                    info(f"Stopping {svc_type} by port {port}")
+                    killed = process_service.kill_processes_on_ports([port])
+                    if killed:
+                        info(f"  Stopped processes on port {port}")
+                    else:
+                        info(f"  No process on port {port}")
 
 
 def remove_worktree(name: str, args) -> None:
@@ -210,23 +194,25 @@ def remove_worktree(name: str, args) -> None:
                 warning(f"Directory removal failed (attempt {attempt + 1}/{max_retries}), retrying...")
                 time.sleep(2)
 
-                # Kill known PIDs from config
-                services = worktree_config.get("services", {})
-                for svc_config in services.values():
-                    pid = svc_config.get("pid")
-                    if pid:
-                        ProcessService().kill_process(pid)
-
-                # Also scan for any processes that might be running in this directory
-                # Look for processes with cwd containing the worktree path
+                # Force kill all ports with taskkill
                 process_service = ProcessService()
-                for proc in psutil.process_iter(['pid', 'cwd', 'cmdline']):
-                    try:
-                        if proc.info.get('cwd') and worktree_path.lower() in proc.info['cwd'].lower():
-                            warning(f"Killing orphaned process: PID {proc.info['pid']}")
-                            process_service.kill_process(proc.info['pid'])
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
+                ports = []
+                for svc_config in worktree_config.get("services", {}).values():
+                    port = svc_config.get("port")
+                    if port:
+                        ports.append(port)
+
+                if ports:
+                    warning(f"Force killing processes on ports: {ports}")
+                    for port in ports:
+                        process_service.kill_processes_on_ports([port])
+                        # Also use taskkill directly
+                        import subprocess
+                        try:
+                            subprocess.run(['taskkill', '/F', '/FI', f'PORT eq {port}'],
+                                           capture_output=True, timeout=5)
+                        except:
+                            pass
             else:
                 warning(f"Could not remove directory: {e}")
 
