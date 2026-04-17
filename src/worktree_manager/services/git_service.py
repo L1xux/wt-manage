@@ -58,7 +58,9 @@ class GitService:
         if not repo_root:
             raise ValueError(f"Not a git repository: {base_path}")
 
-        worktree_path = Path(base_path).parent / name
+        # Use resolve() to get actual parent on Windows
+        base = Path(base_path).resolve() if base_path != "." else Path.cwd()
+        worktree_path = base.parent / name
         branch_name = f"feature/{name}"
 
         # Check if worktree already exists
