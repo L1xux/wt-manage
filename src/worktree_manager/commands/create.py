@@ -190,9 +190,29 @@ def create_worktree(name: str, args) -> None:
         info("Use 'wt-remove' to remove it first, or choose a different name")
         sys.exit(1)
 
+    # Check if worktree directory already exists (but not in config)
+    worktree_path = Path.cwd().parent / name
+    if worktree_path.exists():
+        error(f"Worktree directory already exists: {worktree_path}")
+        info("A previous worktree may have been partially cleaned up.")
+        confirm = input("Remove existing directory and create new worktree? [y/N]: ").strip().lower()
+        if confirm != 'y':
+            info("Cancelled")
+            sys.exit(0)
+
+        # Remove the existing directory
+        import shutil
+        try:
+            shutil.rmtree(worktree_path)
+            info(f"Removed existing directory: {worktree_path}")
+        except Exception as e:
+            error(f"Failed to remove directory: {e}")
+            sys.exit(1)
+
     # Create worktree
     info(f"Creating worktree '{name}'...")
 
+    git_service = GitService()
     try:
         worktree_path = git_service.create_worktree(name, ".")
         success(f"Worktree created at: {worktree_path}")

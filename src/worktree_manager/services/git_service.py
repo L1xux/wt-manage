@@ -65,14 +65,33 @@ class GitService:
         if worktree_path.exists():
             raise ValueError(f"Worktree path already exists: {worktree_path}")
 
-        # Create worktree with new branch
-        subprocess.run(
-            ["git", "worktree", "add", "-b", branch_name, str(worktree_path)],
+        # Check if branch already exists
+        result = subprocess.run(
+            ["git", "branch", "--list", branch_name],
             cwd=repo_root,
-            check=True,
             capture_output=True,
             text=True,
         )
+        branch_exists = bool(result.stdout.strip())
+
+        if branch_exists:
+            # Branch exists, just add worktree with existing branch
+            subprocess.run(
+                ["git", "worktree", "add", str(worktree_path), branch_name],
+                cwd=repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        else:
+            # Branch doesn't exist, create new one
+            subprocess.run(
+                ["git", "worktree", "add", "-b", branch_name, str(worktree_path)],
+                cwd=repo_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
 
         return str(worktree_path.resolve())
 
