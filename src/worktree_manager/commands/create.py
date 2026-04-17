@@ -113,6 +113,27 @@ def analyze_and_configure_services(
                 return True
         return False
 
+    def replace_port_in_command(command: str, new_port: int, default_port: int = 8000) -> str:
+        """Replace port in command string with the assigned port.
+
+        Handles patterns like:
+        - --port 8000
+        - --port=8000
+        - -p 8000
+        - -p=8000
+        """
+        import re
+
+        # Replace --port X or --port=X
+        command = re.sub(r'--port\s+\d+', f'--port {new_port}', command)
+        command = re.sub(r'--port=\d+', f'--port={new_port}', command)
+
+        # Replace -p X or -p=X
+        command = re.sub(r'-p\s+\d+', f'-p {new_port}', command)
+        command = re.sub(r'-p=\d+', f'-p={new_port}', command)
+
+        return command
+
     # Configure each detected service
     for svc in analysis.get("services", []):
         svc_type = svc.get("type")
@@ -138,6 +159,8 @@ def analyze_and_configure_services(
             next_server_port = port + 1
 
             start_command = svc.get("start_command", "python run.py")
+            # Replace hardcoded port in command
+            start_command = replace_port_in_command(start_command, port)
             working_dir = svc.get("working_directory", "server")
 
             abs_working_dir = str(Path(worktree_path) / working_dir)
@@ -182,6 +205,8 @@ def analyze_and_configure_services(
             next_client_port = port + 1
 
             start_command = svc.get("start_command", "npm run dev")
+            # Replace hardcoded port in command
+            start_command = replace_port_in_command(start_command, port)
             working_dir = svc.get("working_directory", "client")
 
             abs_working_dir = str(Path(worktree_path) / working_dir)
