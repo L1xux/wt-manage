@@ -101,8 +101,22 @@ class GitService:
         if force:
             cmd.append("--force")
 
-        subprocess.run(cmd, cwd=repo_root, check=True, capture_output=True)
-        return True
+        result = subprocess.run(
+            cmd, cwd=repo_root, capture_output=True, text=True
+        )
+
+        if result.returncode != 0:
+            # Try pruning first, then remove again
+            subprocess.run(
+                ["git", "worktree", "prune"],
+                cwd=repo_root,
+                capture_output=True,
+            )
+            result = subprocess.run(
+                cmd + ["--force"], cwd=repo_root, capture_output=True, text=True
+            )
+
+        return result.returncode == 0
 
     def list_worktrees(self) -> List[dict]:
         """List all worktrees in the repository.
