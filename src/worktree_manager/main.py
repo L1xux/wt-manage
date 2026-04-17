@@ -19,22 +19,22 @@ from pathlib import Path
 from .utils.logger import error, info, section
 
 
-def create_command(args=None):
+def create_command():
     """Entry point for wt-create command."""
-    from .commands.create import create_worktree
-    create_worktree(args.name, args)
+    from .commands.create import main as create_main
+    create_main()
 
 
-def remove_command(args=None):
+def remove_command():
     """Entry point for wt-remove command."""
-    from .commands.remove import remove_worktree
-    remove_worktree(args.name, args)
+    from .commands.remove import main as remove_main
+    remove_main()
 
 
-def list_command(args=None):
+def list_command():
     """Entry point for wt-list command."""
-    from .commands.list import list_worktrees
-    list_worktrees(args)
+    from .commands.list import main as list_main
+    list_main()
 
 
 def main(args=None):
@@ -108,9 +108,9 @@ Environment:
         info("Run 'wt-create', 'wt-remove', or 'wt-list' to get started")
         return 0
 
-    # Execute command - pass namespace directly
+    # Execute command
     try:
-        return parsed.func(parsed) or 0
+        return parsed.func() or 0
     except KeyboardInterrupt:
         info("\nOperation cancelled by user")
         return 130
