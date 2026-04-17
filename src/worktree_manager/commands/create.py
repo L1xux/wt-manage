@@ -4,14 +4,13 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
-from ..config import ConfigManager
+from ..config import ConfigManager, WorktreeConfig
 from ..services.ai_service import AIService
 from ..services.git_service import GitService
-from ..services.port_service import PortService
 from ..services.process_service import ProcessService
 from ..utils.logger import error, info, success, warning
 
@@ -71,14 +70,16 @@ def verify_git_repo() -> str:
 def analyze_and_configure_services(
     worktree_path: str,
     ai_service: AIService,
-    port_service: PortService,
-    config: ConfigManager,
-) -> Dict[str, any]:
+    base_server_port: int = 8000,
+    base_client_port: int = 5173,
+) -> Tuple[Dict[str, any], List[str]]:
     """Analyze project and configure services.
 
     Returns:
-        Dictionary of configured services with ports and PIDs.
+        Tuple of (services_dict, services_info_list).
     """
+    from ..services.port_service import PortService
+
     info("Analyzing project structure...")
 
     # Use AI to detect services
@@ -86,6 +87,18 @@ def analyze_and_configure_services(
 
     services = {}
     services_info = []
+    server_count = 0
+    client_count = 0
+    port_service = PortService()
+    next_server_port = base_server_port
+    next_client_port = base_client_port
+
+    def find_free_port(start_from: int) -> int:
+        """Find next free port starting from start_from."""
+        port = start_from
+        while port_service.is_port_in_use(port):
+            port += 1
+        return port
 
     # Configure each detected service
     for svc in analysis.get("services", []):
@@ -106,7 +119,11 @@ def analyze_and_configure_services(
                 services_info.append(f"  Docker: {compose_file}")
 
         elif svc_type == "server":
-            port = config.get_next_port("server")
+            server_count += 1
+            svc_name = f"server-{server_count}" if server_count > 1 else "server"
+            port = find_free_port(next_server_port)
+            next_server_port = port + 1
+
             start_command = svc.get("start_command", "python run.py")
             working_dir = svc.get("working_directory", "server")
 
@@ -120,10 +137,9 @@ def analyze_and_configure_services(
             pid = process_service.start_process(
                 command=start_command,
                 cwd=abs_working_dir,
-                env={"PORT": str(port)},
             )
 
-            services["server"] = {
+            services[svc_name] = {
                 "port": port,
                 "pid": pid,
                 "start_command": start_command,
@@ -132,7 +148,11 @@ def analyze_and_configure_services(
             services_info.append(f"  Server: http://localhost:{port}")
 
         elif svc_type == "client":
-            port = config.get_next_port("client")
+            client_count += 1
+            svc_name = f"client-{client_count}" if client_count > 1 else "client"
+            port = find_free_port(next_client_port)
+            next_client_port = port + 1
+
             start_command = svc.get("start_command", "npm run dev")
             working_dir = svc.get("working_directory", "client")
 
@@ -148,7 +168,7 @@ def analyze_and_configure_services(
                 cwd=abs_working_dir,
             )
 
-            services["client"] = {
+            services[svc_name] = {
                 "port": port,
                 "pid": pid,
                 "start_command": start_command,
@@ -156,7 +176,7 @@ def analyze_and_configure_services(
             }
             services_info.append(f"  Client: http://localhost:{port}")
 
-    return services
+    return services, services_info
 
 
 def create_worktree(name: str, args) -> None:
@@ -180,39 +200,38 @@ def create_worktree(name: str, args) -> None:
 
     # Initialize services
     git_service = GitService()
-    port_service = PortService()
     ai_service = AIService()
     config = ConfigManager()
 
-    # Check if worktree already exists in config
-    if config.worktree_exists(name):
-        error(f"Worktree '{name}' already exists in configuration")
-        info("Use 'wt-remove' to remove it first, or choose a different name")
-        sys.exit(1)
-
-    # Check if worktree directory already exists (but not in config)
+    # Check if worktree directory already exists with a config
     worktree_path = Path.cwd().parent / name
     if worktree_path.exists():
-        error(f"Worktree directory already exists: {worktree_path}")
-        info("A previous worktree may have been partially cleaned up.")
-        confirm = input("Remove existing directory and create new worktree? [y/N]: ").strip().lower()
-        if confirm != 'y':
-            info("Cancelled")
-            sys.exit(0)
-
-        # Remove the existing directory
-        import shutil
-        try:
-            shutil.rmtree(worktree_path)
-            info(f"Removed existing directory: {worktree_path}")
-        except Exception as e:
-            error(f"Failed to remove directory: {e}")
+        wt_config = WorktreeConfig(str(worktree_path))
+        if wt_config.exists():
+            error(f"Worktree '{name}' already exists")
+            info(f"Path: {worktree_path}")
+            info("Use 'wt-remove' to remove it first, or choose a different name")
             sys.exit(1)
+        else:
+            error(f"Worktree directory already exists: {worktree_path}")
+            info("A previous worktree may have been partially cleaned up.")
+            confirm = input("Remove existing directory and create new worktree? [y/N]: ").strip().lower()
+            if confirm != 'y':
+                info("Cancelled")
+                sys.exit(0)
+
+            # Remove the existing directory
+            import shutil
+            try:
+                shutil.rmtree(worktree_path)
+                info(f"Removed existing directory: {worktree_path}")
+            except Exception as e:
+                error(f"Failed to remove directory: {e}")
+                sys.exit(1)
 
     # Create worktree
     info(f"Creating worktree '{name}'...")
 
-    git_service = GitService()
     try:
         worktree_path = git_service.create_worktree(name, ".")
         success(f"Worktree created at: {worktree_path}")
@@ -224,28 +243,28 @@ def create_worktree(name: str, args) -> None:
         sys.exit(1)
 
     # Analyze and configure services
-    services = analyze_and_configure_services(
+    services, services_info = analyze_and_configure_services(
         worktree_path=worktree_path,
         ai_service=ai_service,
-        port_service=port_service,
-        config=config,
     )
 
-    # Save configuration
-    config.add_worktree(
-        name=name,
-        path=worktree_path,
-        services=services,
-        created_at=datetime.now().isoformat(),
-    )
+    # Save configuration to worktree's .worktree/config.json
+    wt_config = WorktreeConfig(str(worktree_path))
+    config_data = {
+        "name": name,
+        "created_at": datetime.now().isoformat(),
+        "services": services,
+    }
+    wt_config.save(config_data)
+    success("Configuration saved")
 
     # Print summary
     print()
     success(f"Worktree '{name}' created successfully!")
     print()
     info("Services started:")
-    for svc_info in services:
-        print(f"  - {svc_info}")
+    for svc_info in services_info:
+        print(svc_info)
 
     if not services:
         warning("No services detected or started")

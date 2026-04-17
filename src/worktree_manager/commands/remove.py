@@ -3,33 +3,54 @@
 import sys
 from pathlib import Path
 
-from ..config import ConfigManager
+import psutil
+
+from ..config import ConfigManager, WorktreeConfig
 from ..services.git_service import GitService
 from ..services.process_service import ProcessService
 from ..utils.logger import error, info, success, warning
 
 
-def get_worktree_name(args_name: str, config: ConfigManager) -> str:
-    """Get worktree name from args or prompt user to select.
+def get_worktree_path(name: str, config: ConfigManager) -> str:
+    """Get worktree path by name, or prompt user to select.
 
     Args:
-        args_name: Name provided as argument.
+        name: Worktree name provided as argument.
         config: ConfigManager instance.
 
     Returns:
-        Selected worktree name.
+        Path to the worktree.
 
     Raises:
         SystemExit: If no worktrees exist or invalid selection.
     """
-    if args_name:
-        return args_name
+    # Get base path where we scan for worktrees (parent of worktree-manager)
+    base_path = Path(__file__).parent.parent.parent.parent  # worktree-manager dir
+    scan_dir = base_path.parent  # parent of worktree-manager
 
-    worktrees = config.get_all_worktrees()
+    if name:
+        # First try: find by config file (key matches worktree name)
+        worktrees = config.discover_worktrees()
+        wt_info = worktrees.get(name)
+        if wt_info:
+            return wt_info.get("path", "")
+
+        # Second try: directory exists (directory name = worktree name)
+        worktree_path = scan_dir / name
+        if worktree_path.exists() and worktree_path.is_dir():
+            info(f"Found worktree directory: {worktree_path}")
+            return str(worktree_path)
+
+        error(f"Worktree '{name}' not found")
+        sys.exit(1)
+
+    worktrees = config.discover_worktrees()
 
     if not worktrees:
-        error("No worktrees found in configuration")
-        sys.exit(1)
+        # Check if there are any directories that might be worktrees without config
+        info("No worktrees with config files found.")
+        info(f"Scanning directory: {scan_dir}")
+        print()
 
     # Show list and prompt for selection
     info("Select a worktree to remove:")
@@ -58,30 +79,30 @@ def get_worktree_name(args_name: str, config: ConfigManager) -> str:
     try:
         idx = int(selection) - 1
         if 0 <= idx < len(names):
-            return names[idx]
+            selected_name = names[idx]
+            return worktrees[selected_name].get("path", "")
     except ValueError:
         pass
 
     # Try to match by name
     if selection in worktrees:
-        return selection
+        return worktrees[selection].get("path", "")
 
     error(f"Invalid selection: {selection}")
     sys.exit(1)
 
 
-def kill_worktree_services(worktree_config: dict) -> None:
+def kill_worktree_services(worktree_config: dict, worktree_path: str = "") -> None:
     """Kill all services associated with a worktree.
 
     Args:
         worktree_config: Worktree configuration dictionary.
+        worktree_path: Path to the worktree directory for orphaned process cleanup.
     """
     services = worktree_config.get("services", {})
     process_service = ProcessService()
 
-    ports_to_kill = []
-    pids_to_kill = []
-
+    # First pass: kill by PID
     for svc_type, svc_config in services.items():
         if svc_type == "docker":
             compose_file = svc_config.get("compose_file")
@@ -89,24 +110,35 @@ def kill_worktree_services(worktree_config: dict) -> None:
                 warning(f"Stopping docker compose: {compose_file}")
                 process_service.stop_docker_compose(compose_file)
 
-        elif svc_type == "server" or svc_type == "client":
-            # Kill by PID
+        elif svc_type.startswith("server") or svc_type.startswith("client"):
             pid = svc_config.get("pid")
             if pid and process_service.is_process_running(pid):
                 info(f"Stopping {svc_type} (PID: {pid})")
                 process_service.kill_process(pid)
-                pids_to_kill.append(pid)
 
-            # Also kill by port as fallback
-            port = svc_config.get("port")
-            if port:
-                ports_to_kill.append(port)
+    # Second pass: kill by port (fallback if PID didn't work or wasn't stored)
+    ports = []
+    for svc_config in services.values():
+        port = svc_config.get("port")
+        if port:
+            ports.append(port)
 
-    # Kill any remaining processes on ports
-    if ports_to_kill:
-        killed = process_service.kill_processes_on_ports(ports_to_kill)
+    if ports:
+        killed = process_service.kill_processes_on_ports(ports)
         if killed:
-            info(f"Stopped processes on ports: {ports_to_kill}")
+            info(f"Stopped processes on ports: {ports}")
+
+    # Third pass: kill orphaned processes by cwd (for worktrees without config)
+    if worktree_path:
+        worktree_path_lower = worktree_path.lower()
+        for proc in psutil.process_iter(['pid', 'cwd', 'name']):
+            try:
+                cwd = proc.info.get('cwd')
+                if cwd and worktree_path_lower in cwd.lower():
+                    warning(f"Killing orphaned process: PID {proc.info['pid']} ({proc.info['name']})")
+                    process_service.kill_process(proc.info['pid'])
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
 
 
 def remove_worktree(name: str, args) -> None:
@@ -118,27 +150,29 @@ def remove_worktree(name: str, args) -> None:
     """
     config = ConfigManager()
 
-    # Get worktree config
-    worktree_config = config.get_worktree(name)
+    # Get worktree path
+    worktree_path = get_worktree_path(name, config)
 
-    if not worktree_config:
-        error(f"Worktree '{name}' not found in configuration")
+    if not worktree_path or not Path(worktree_path).exists():
+        error(f"Worktree '{name}' not found or path doesn't exist")
         sys.exit(1)
 
-    path = worktree_config.get("path")
+    # Load config from worktree directory
+    wt_config = WorktreeConfig(worktree_path)
+    worktree_config = wt_config.load()
 
     # Confirm removal
     if not args.force:
         info(f"About to remove worktree '{name}'")
-        info(f"  Path: {path}")
+        info(f"  Path: {worktree_path}")
 
         services = worktree_config.get("services", {})
         if services:
             info("  Services running:")
             for svc_type, svc_config in services.items():
-                port = svc_config.get("port", "N/A")
                 pid = svc_config.get("pid", "N/A")
-                info(f"    - {svc_type}: port={port}, pid={pid}")
+                start_cmd = svc_config.get("start_command", "N/A")
+                info(f"    - {svc_type}: pid={pid}")
 
         print()
         confirm = input("Remove this worktree? [y/N]: ").strip().lower()
@@ -152,45 +186,56 @@ def remove_worktree(name: str, args) -> None:
     kill_worktree_services(worktree_config)
 
     # Remove worktree from git
-    if path:
-        path_obj = Path(path)
-        if path_obj.exists():
-            info(f"Removing git worktree: {path}")
+    info(f"Removing git worktree: {worktree_path}")
 
-            git_service = GitService()
-            try:
-                removed = git_service.remove_worktree(path, force=True)
-                if removed:
-                    success("Git worktree removed")
-                else:
-                    warning("Git worktree removal returned False (may already be removed)")
-                    # Clean up the directory anyway
-                # Clean up the directory (git worktree remove doesn't always delete contents)
-                import shutil
-                try:
-                    shutil.rmtree(path)
-                    info(f"Directory cleaned up: {path}")
-                except Exception as e:
-                    warning(f"Could not remove directory: {e}")
-            except Exception as e:
-                warning(f"Failed to remove git worktree: {e}")
-                # Try to clean up directory anyway
-                try:
-                    shutil.rmtree(path)
-                    info(f"Directory cleaned up: {path}")
-                except Exception as e2:
-                    warning(f"Could not remove directory: {e2}")
-        else:
-            info(f"Worktree directory already removed: {path}")
-    else:
-        warning("No path in worktree configuration")
+    git_service = GitService()
+    removed = git_service.remove_worktree(worktree_path, force=True)
+    if not removed:
+        warning("Git worktree removal returned False (may already be removed)")
 
-    # Remove from config
-    config.remove_worktree(name)
-    success(f"Configuration for '{name}' removed")
+    # Clean up the directory (git worktree remove doesn't always delete contents)
+    import shutil
+    import time
+    max_retries = 5
+    directory_removed = False
+
+    for attempt in range(max_retries):
+        try:
+            shutil.rmtree(worktree_path)
+            info(f"Directory cleaned up: {worktree_path}")
+            directory_removed = True
+            break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                warning(f"Directory removal failed (attempt {attempt + 1}/{max_retries}), retrying...")
+                time.sleep(2)
+
+                # Kill known PIDs from config
+                services = worktree_config.get("services", {})
+                for svc_config in services.values():
+                    pid = svc_config.get("pid")
+                    if pid:
+                        ProcessService().kill_process(pid)
+
+                # Also scan for any processes that might be running in this directory
+                # Look for processes with cwd containing the worktree path
+                process_service = ProcessService()
+                for proc in psutil.process_iter(['pid', 'cwd', 'cmdline']):
+                    try:
+                        if proc.info.get('cwd') and worktree_path.lower() in proc.info['cwd'].lower():
+                            warning(f"Killing orphaned process: PID {proc.info['pid']}")
+                            process_service.kill_process(proc.info['pid'])
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+            else:
+                warning(f"Could not remove directory: {e}")
 
     print()
-    success(f"Worktree '{name}' removed successfully")
+    if directory_removed:
+        success(f"Worktree '{name}' removed successfully")
+    else:
+        warning(f"Worktree directory could not be fully removed")
+        warning("You may need to manually clean up or kill remaining processes")
 
 
 def main(args=None):
@@ -213,10 +258,17 @@ def main(args=None):
 
     parsed_args = parser.parse_args(args)
 
-    config = ConfigManager()
-    name = get_worktree_name(parsed_args.name, config)
+    if not parsed_args.name:
+        # Show selection prompt
+        config = ConfigManager()
+        worktrees = config.discover_worktrees()
+        if not worktrees:
+            error("No worktrees found")
+            sys.exit(1)
 
-    remove_worktree(name, parsed_args)
+        parsed_args.name = get_worktree_path(None, config)
+
+    remove_worktree(parsed_args.name, parsed_args)
 
 
 if __name__ == "__main__":

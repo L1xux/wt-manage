@@ -224,6 +224,41 @@ Return ONLY valid JSON in this exact format, no markdown or explanation:
                 if project_type == "unknown":
                     project_type = "frontend-only"
 
+        # Check for admin-server directory
+        admin_server_path = root / "admin-server"
+        if admin_server_path.exists():
+            if (admin_server_path / "requirements.txt").exists() or (admin_server_path / "pyproject.toml").exists():
+                services.append({
+                    "type": "server",
+                    "name": "Admin Server",
+                    "detection_paths": [str(admin_server_path / "requirements.txt")],
+                    "start_command": "python run.py",
+                    "working_directory": "admin-server",
+                    "port_hints": [8080, 8000],
+                })
+            elif (admin_server_path / "package.json").exists():
+                services.append({
+                    "type": "server",
+                    "name": "Admin Server",
+                    "detection_paths": [str(admin_server_path / "package.json")],
+                    "start_command": "npm run dev",
+                    "working_directory": "admin-server",
+                    "port_hints": [8080, 8000],
+                })
+
+        # Check for admin-client directory
+        admin_client_path = root / "admin-client"
+        if admin_client_path.exists():
+            if (admin_client_path / "package.json").exists():
+                services.append({
+                    "type": "client",
+                    "name": "Admin Client",
+                    "detection_paths": [str(admin_client_path / "package.json")],
+                    "start_command": "npm run dev",
+                    "working_directory": "admin-client",
+                    "port_hints": [5001, 5174, 3000],
+                })
+
         # Check for docker-compose files
         for docker_file in root.glob("docker-compose*.yml"):
             docker_files.append(str(docker_file))

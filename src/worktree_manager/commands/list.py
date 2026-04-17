@@ -3,7 +3,7 @@
 import sys
 from datetime import datetime
 
-from ..config import ConfigManager
+from ..config import ConfigManager, WorktreeConfig
 from ..services.process_service import ProcessService
 from ..utils.logger import dim, error, info, section, success, value
 
@@ -24,50 +24,22 @@ def format_date(iso_date: str) -> str:
         return iso_date
 
 
-def check_service_status(service_config: dict) -> tuple:
+def check_service_status(svc_config: dict) -> tuple:
     """Check if a service is running.
 
     Args:
-        service_config: Service configuration dictionary.
+        svc_config: Service configuration dictionary.
 
     Returns:
         Tuple of (status_text, is_running).
     """
     process_service = ProcessService()
-    pid = service_config.get("pid")
-    port = service_config.get("port")
+    pid = svc_config.get("pid")
 
     if pid and process_service.is_process_running(pid):
         return ("running", True)
 
-    # Check by port as fallback
-    if port:
-        if process_service.is_port_listening(port):
-            return ("running", True)
-
     return ("stopped", False)
-
-
-def format_service_row(service_type: str, config: dict, max_len: int = 50) -> str:
-    """Format a service row for display.
-
-    Args:
-        service_type: Type of service (server, client, docker).
-        config: Service configuration.
-        max_len: Maximum length for command display.
-
-    Returns:
-        Formatted row string.
-    """
-    port = config.get("port", "N/A")
-    pid = config.get("pid", "N/A")
-    start_cmd = config.get("start_command", "N/A")
-
-    # Truncate command if too long
-    if len(start_cmd) > max_len:
-        start_cmd = start_cmd[:max_len-3] + "..."
-
-    return f"  {service_type:8} | port:{port:5} | pid:{pid:6} | {start_cmd}"
 
 
 def list_worktrees(args) -> None:
@@ -77,7 +49,7 @@ def list_worktrees(args) -> None:
         args: Parsed command line arguments.
     """
     config = ConfigManager()
-    worktrees = config.get_all_worktrees()
+    worktrees = config.discover_worktrees()
 
     if not worktrees:
         print()
@@ -86,8 +58,6 @@ def list_worktrees(args) -> None:
         info("Create one with: wt-create <name>")
         print()
         return
-
-    process_service = ProcessService()
 
     section("Worktree Manager - Active Worktrees")
 
@@ -121,8 +91,10 @@ def list_worktrees(args) -> None:
                     if is_running:
                         any_running = True
                     status_symbol = "+" if is_running else "-"
-                    print(f"  {status_symbol} {svc_type:8} | port:{svc_config.get('port', 'N/A'):5} | pid:{svc_config.get('pid', 'N/A'):6}")
-                    print(f"              | {svc_config.get('start_command', 'N/A')}")
+                    pid = svc_config.get("pid", "N/A")
+                    start_cmd = svc_config.get("start_command", "N/A")
+                    print(f"  {status_symbol} {svc_type:8} | pid:{pid:6}")
+                    print(f"              | {start_cmd}")
 
             print("-" * 60)
 
