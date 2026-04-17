@@ -1,0 +1,4 @@
+[console_scripts]
+wt-create = worktree_manager.main:create_command
+wt-list = worktree_manager.main:list_command
+wt-remove = worktree_manager.main:remove_command
