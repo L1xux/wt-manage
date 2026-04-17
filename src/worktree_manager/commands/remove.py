@@ -87,32 +87,41 @@ def remove_worktree(name: str, args) -> None:
 
     # Delete directory
     import subprocess
-    deleted = False
+    import os
 
     if sys.platform == 'win32':
+        # Try PowerShell first
         try:
-            subprocess.run(
-                ['powershell', '-Command', f'Remove-Item -Path "{worktree_path}" -Recurse -Force'],
+            result = subprocess.run(
+                ['powershell', '-Command', f'Remove-Item -Path "{worktree_path}" -Recurse -Force -ErrorAction Stop'],
                 capture_output=True,
                 timeout=30
             )
-            deleted = True
-        except:
-            pass
+            if result.returncode == 0 and not os.path.exists(worktree_path):
+                pass  # Successfully deleted
+            else:
+                warning(f"PowerShell deletion failed: {result.stderr.decode() if result.stderr else 'unknown error'}")
+        except Exception as e:
+            warning(f"PowerShell error: {e}")
 
-        if not deleted:
+        # Try cmd as fallback
+        if os.path.exists(worktree_path):
             try:
                 subprocess.run(['cmd', '/c', 'rd', '/s', '/q', worktree_path], capture_output=True, timeout=30)
-                deleted = True
-            except:
-                pass
+            except Exception as e:
+                warning(f"CMD deletion error: {e}")
     else:
         import shutil
         try:
             shutil.rmtree(worktree_path)
-            deleted = True
         except Exception as e:
             warning(f"Could not remove directory: {e}")
+
+    # Verify deletion
+    if os.path.exists(worktree_path):
+        warning(f"Directory still exists: {worktree_path}")
+        warning("Please close any programs that have this folder open")
+        return
 
     print()
     success(f"Worktree '{name}' removed successfully")
