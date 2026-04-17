@@ -152,18 +152,38 @@ def remove_worktree(name: str, args) -> None:
     kill_worktree_services(worktree_config)
 
     # Remove worktree from git
-    if path and Path(path).exists():
-        info(f"Removing git worktree: {path}")
+    if path:
+        path_obj = Path(path)
+        if path_obj.exists():
+            info(f"Removing git worktree: {path}")
 
-        git_service = GitService()
-        try:
-            git_service.remove_worktree(path, force=True)
-            success("Git worktree removed")
-        except Exception as e:
-            warning(f"Failed to remove git worktree: {e}")
-            warning("You may need to manually remove the directory")
+            git_service = GitService()
+            try:
+                removed = git_service.remove_worktree(path, force=True)
+                if removed:
+                    success("Git worktree removed")
+                else:
+                    warning("Git worktree removal returned False (may already be removed)")
+                    # Clean up the directory anyway
+                # Clean up the directory (git worktree remove doesn't always delete contents)
+                import shutil
+                try:
+                    shutil.rmtree(path)
+                    info(f"Directory cleaned up: {path}")
+                except Exception as e:
+                    warning(f"Could not remove directory: {e}")
+            except Exception as e:
+                warning(f"Failed to remove git worktree: {e}")
+                # Try to clean up directory anyway
+                try:
+                    shutil.rmtree(path)
+                    info(f"Directory cleaned up: {path}")
+                except Exception as e2:
+                    warning(f"Could not remove directory: {e2}")
+        else:
+            info(f"Worktree directory already removed: {path}")
     else:
-        warning(f"Worktree path not found: {path}")
+        warning("No path in worktree configuration")
 
     # Remove from config
     config.remove_worktree(name)
